@@ -12,7 +12,6 @@ from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import messagebox
 import threading
-import serial
 
 # Initialize Firebase Admin SDK
 cred = credentials.Certificate(r'C:\Users\Hp\Desktop\Testcode\env\serviceAccountKey.json')
@@ -23,63 +22,19 @@ firebase_admin.initialize_app(cred, {
 
 bucket = storage.bucket()
 
-def get_latitude_longitude_utc(port, baudrate):
-    latitude, longitude, utc = None, None, None
-    
-    def parse_gpgga(sentence):
-        nonlocal latitude, longitude, utc
-        fields = sentence.split(",")
-        if fields[0] == "$GPGGA":
-            utc = fields[1]
-            latitude = fields[2]
-            if fields[3] == "S":
-                latitude = -float(latitude)
-            else:
-                latitude = float(latitude)
-            longitude = fields[4]
-            if fields[5] == "W":
-                longitude = -float(longitude)
-            else:
-                longitude = float(longitude)
-
-    def read_gps_data():
-        try:
-            with serial.Serial(port, baudrate, timeout=1) as ser:
-                while True:
-                    if ser.in_waiting > 0:
-                        line = ser.readline().decode('ascii', errors='replace').strip()
-                        if line.startswith("$GPGGA"):
-                            parse_gpgga(line)
-                            break
-        except Exception as e:
-            print(f"Error: {e}")
-    
-    read_gps_data()
-    return latitude, longitude, utc
-
 def register_student():
     def submit_data():
         student_id = entry_id.get()
-        
-        # Retrieve GPS data
-        gps_port = "/dev/ttyS0"
-        baud_rate = 9600
-        latitude, longitude, utc = get_latitude_longitude_utc(gps_port, baud_rate)
-
         student_data = {
             "ID": entry_id.get(),
             "name": entry_name.get(),
             "major": entry_major.get(),
             "starting_year": int(entry_starting_year.get()),
-            "total_attendance": 0,
+            "total_attendance": 0,  # Automatically set to 0
             "standing": entry_standing.get(),
             "year": int(entry_year.get()),
-            "last_attendance_time": (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
-            "latitude": latitude,
-            "longitude": longitude,
-            "utc": utc
+            "last_attendance_time": (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")  # Set to 24 hours ago
         }
-        
         ref = db.reference('Students')
         ref.child(student_id).set(student_data)
         messagebox.showinfo("Success", "Data submitted successfully!")
@@ -114,6 +69,18 @@ def register_student():
 
     submit_button = tk.Button(register_window, text="Submit", command=submit_data)
     submit_button.grid(row=6, column=1)
+
+def read_last_gps_data(file_path):
+    try:
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+            if lines:
+                last_line = lines[-1]
+                utc_time, latitude, longitude = last_line.strip().split(',')
+                return utc_time, float(latitude), float(longitude)
+    except Exception as e:
+        print(f"Error reading GPS data: {e}")
+    return None, None, None
 
 def login():
     cap = cv2.VideoCapture(0)
@@ -196,7 +163,7 @@ def login():
                     # Get the Image from the storage
                     blob = bucket.get_blob(f'Images/{id}.png')
                     if blob is None:
-                        cv2.putText(imgBackground, "No Image Found", (250, 300), cv2.FONT_HERSHEY_COMPLEX, 2, (0, 0, 255), 3)
+                        cv2.putText(imgBackground, "Image Not Found", (250, 300), cv2.FONT_HERSHEY_COMPLEX, 2, (0, 0, 255), 3)
                         cv2.imshow("Face Attendance", imgBackground)
                         cv2.waitKey(3000)  # Display for 3 seconds
                         counter = 0
@@ -206,14 +173,6 @@ def login():
                     array = np.frombuffer(blob.download_as_string(), np.uint8)
                     imgStudent = cv2.imdecode(array, cv2.COLOR_BGRA2BGR)
                     
-                    # Retrieve GPS data
-                    gps_port = "/dev/ttyS0"
-                    baud_rate = 9600
-                    latitude, longitude, utc = get_latitude_longitude_utc(gps_port, baud_rate)
-                    studentInfo['latitude'] = latitude
-                    studentInfo['longitude'] = longitude
-                    studentInfo['utc'] = utc
-
                     # Update data of attendance
                     last_attendance_time = studentInfo.get('last_attendance_time', "")
                     if last_attendance_time:
@@ -227,9 +186,6 @@ def login():
                         studentInfo['total_attendance'] += 1
                         ref.child('total_attendance').set(studentInfo['total_attendance'])
                         ref.child('last_attendance_time').set(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                        ref.child('latitude').set(latitude)
-                        ref.child('longitude').set(longitude)
-                        ref.child('utc').set(utc)
                         modeType = 4  # Set to scan successful mode
                     else:
                         modeType = 3
@@ -271,6 +227,12 @@ def login():
 
                             imgBackground[175:175 + 216, 909:909 + 216] = imgStudent
 
+                        # Read and display the latest GPS location
+                        utc_time, latitude, longitude = read_last_gps_data('gps_data.txt')
+                        if utc_time and latitude and longitude:
+                            gps_info = f"UTC: {utc_time}, Lat: {latitude:.6f}, Lon: {longitude:.6f}"
+                            cv2.putText(imgBackground, gps_info, (250, 700), cv2.FONT_HERSHEY_COMPLEX, 0.6, (0, 255, 0), 1)
+
                         counter += 1
 
                         if counter >= 20:
@@ -292,19 +254,21 @@ def login():
     cap.release()
     cv2.destroyAllWindows()
 
-def register_face():
-    def run_script():
-        os.system(r'python C:\Users\Hp\Desktop\Testcode\env\encodetest.py')
-    
-    thread = threading.Thread(target=run_script)
-    thread.start()
+def on_closing():
+    if messagebox.askokcancel("Quit", "Do you want to quit?"):
+        root.destroy()
 
-# Initial GUI Window
 root = tk.Tk()
-root.title("Student Management System")
+root.title("Main Application")
+root.protocol("WM_DELETE_WINDOW", on_closing)
 
-tk.Button(root, text="Register", command=register_student, width=20, height=2).pack(pady=10)
-tk.Button(root, text="Register Face", command=register_face, width=20, height=2).pack(pady=10)
-tk.Button(root, text="Login", command=login, width=20, height=2).pack(pady=10)
+frame = tk.Frame(root)
+frame.pack(pady=20, padx=20)
+
+register_button = tk.Button(frame, text="Register", command=register_student)
+register_button.grid(row=0, column=0, padx=10)
+
+login_button = tk.Button(frame, text="Login", command=lambda: threading.Thread(target=login).start())
+login_button.grid(row=0, column=1, padx=10)
 
 root.mainloop()
